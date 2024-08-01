@@ -1,0 +1,56 @@
+version: '3.3'
+
+services:
+  postgres-master:
+    build:
+      context: ./db
+      dockerfile: dockerfile
+    container_name: db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - postgres-network
+
+  postgres-replica:
+    build:
+      context: ./db_repl
+      dockerfile: dockerfile
+    container_name: db_repl
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE}
+    ports:
+      - "5433:5432"
+    volumes:
+      - db-repl-data:/var/lib/postgresql/data
+    depends_on:
+      - postgres-master
+    networks:
+      - postgres-network
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: dockerfile
+    container_name: bot
+    depends_on:
+      - postgres-master
+    networks:
+      - postgres-network
+    env_file:
+      - ./.env
+
+volumes:
+  db-data:
+  db-repl-data:
+
+networks:
+  postgres-network:
+    driver: bridge

@@ -1,0 +1,15 @@
+# Use the official PostgreSQL image as base
+FROM postgres:16
+
+# Copy initialization scripts and configuration files
+COPY 01-init.sql /docker-entrypoint-initdb.d/
+COPY postgresql.conf /etc/postgresql/postgresql.conf
+COPY pg_hba.conf /etc/postgresql/pg_hba.conf
+COPY user_replica.sql /docker-entrypoint-initdb.d/
+
+# Ensure log directory exists and has correct permissions
+RUN mkdir -p /var/log/postgresql && \
+    chown -R postgres:postgres /var/log/postgresql
+
+# Expose the PostgreSQL port
+EXPOSE 5432
