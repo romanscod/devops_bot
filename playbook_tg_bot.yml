@@ -1,0 +1,233 @@
+---
+
+- name: Precheck
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Install apt to localhost
+      become: true
+      become_method: sudo
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - sshpass
+        - python3
+        - python3-pip
+        - git
+        - gnupg  
+
+
+    - name: Create local bot directory
+      file:
+        path: "./bot"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Download bot.py from GitHub
+      get_url:
+        url: "https://raw.githubusercontent.com/romanscod/devops_bot/Ansible/bot/bot.py"
+        dest: "./bot/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0750'
+
+    - name: Download bot.py from GitHub
+      get_url:
+        url: "https://raw.githubusercontent.com/romanscod/devops_bot/Ansible/bot/requirements.txt"
+        dest: "./bot/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0666'
+
+    - name: Install required for bot
+      pip:
+        requirements: "/home/administrator/bot/requirements.txt"
+        executable: pip3
+
+
+- name: Install and configure PostgreSQL with replication
+  hosts: database_servers
+  become: true
+  become_method: sudo
+  vars:
+    pgpass_file: /home/administrator/pgpass
+
+  tasks:
+    - name: Ensure /tmp/ansible directory exists with correct permissions
+      file:
+        path: /tmp/ansible
+        state: directory
+        mode: '1777'
+      become: true
+      become_user: root
+
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - gnupg
+        - lsb-release
+        - software-properties-common
+        - acl
+
+    - name: Install PostgreSQL GPG key
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+
+    - name: Add PostgreSQL APT repository
+      apt_repository:
+        repo: deb http://apt.postgresql.org/pub/repos/apt/ bullseye-pgdg main
+        filename: 'pgdg'
+        update_cache: yes
+
+    - name: Install PostgreSQL 12
+      apt:
+        name: postgresql-12
+        state: present
+        update_cache: yes
+
+    - name: Ensure PostgreSQL service is running
+      service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Copy pgpass file to target hosts
+      copy:
+        src: "{{ pgpass_file }}"
+        dest: "{{ pgpass_file }}"
+        owner: postgres
+        group: postgres
+        mode: '0600'
+
+    - name: Extract password for postgres user from pgpass file
+      shell: |
+        grep 'postgres:' {{ pgpass_file }} | cut -d':' -f2
+      register: postgres_password
+      changed_when: false
+
+    - debug:
+        var: postgres_password.stdout
+
+    - name: Set password for postgres user
+      shell: |
+        psql -c "ALTER USER postgres WITH PASSWORD '{{ postgres_password.stdout.strip() }}';"
+      environment:
+        PGPASSFILE: "{{ pgpass_file }}"
+      become: true
+      become_user: postgres
+
+    - name: Extract password for replicator user from pgpass file
+      shell: |
+        grep 'replicator:' {{ pgpass_file }} | cut -d':' -f2
+      register: replicator_password
+      changed_when: false
+
+    - debug:
+        var: replicator_password.stdout
+
+    - name: Create replication user on master
+      shell: |
+        psql -c "CREATE USER replicator REPLICATION LOGIN ENCRYPTED PASSWORD '{{ replicator_password.stdout.strip() }}';"
+      environment:
+        PGPASSFILE: "{{ pgpass_file }}"
+      become: true
+      become_user: postgres
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure PostgreSQL settings on master
+      lineinfile:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#?listen_addresses'
+        line: "listen_addresses = '*'"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure PostgreSQL for replication on master
+      lineinfile:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#?wal_level'
+        line: "wal_level = replica"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure PostgreSQL for replication on master
+      lineinfile:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#?max_wal_senders'
+        line: "max_wal_senders = 10"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure PostgreSQL for replication on master
+      lineinfile:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#?archive_mode'
+        line: "archive_mode = on"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure PostgreSQL for replication on master
+      lineinfile:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#?archive_command'
+        line: "archive_command = 'cp %p /var/lib/postgresql/12/main/archive/%f'"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure pg_hba.conf to allow replication connections on master
+      lineinfile:
+        path: /etc/postgresql/12/main/pg_hba.conf
+        line: "host replication replicator 0.0.0.0/0 md5"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Configure pg_hba.conf to allow all IPs on master
+      lineinfile:
+        path: /etc/postgresql/12/main/pg_hba.conf
+        line: "host all all 0.0.0.0/0 md5"
+        create: yes
+      when: inventory_hostname == 'db_master'
+
+    - name: Restart PostgreSQL on master to apply configuration changes
+      service:
+        name: postgresql
+        state: restarted
+      become: true
+      become_user: root
+      when: inventory_hostname == 'db_master'
+
+    - name: Stop PostgreSQL on slave
+      service:
+        name: postgresql
+        state: stopped
+      become: true
+      become_user: root
+      when: inventory_hostname == 'db_slave'
+
+    - name: Clean up PostgreSQL data directory on slave
+      shell: rm -rf /var/lib/postgresql/12/main/*
+      become: true
+      become_user: postgres 
+      when: inventory_hostname == 'db_slave'
+
+    - name: Set up replication on slave
+      shell: |
+        PGPASSWORD={{ replicator_password.stdout.strip() }} pg_basebackup -R -h {{ hostvars['db_master']['ansible_host'] }} -U replicator -D /var/lib/postgresql/12/main -P
+      become: true
+      become_user: postgres 
+      when: inventory_hostname == 'db_slave'
+
+    - name: Start PostgreSQL on slave
+      service:
+        name: postgresql
+        state: started
+      become: true
+      become_user: root
+      when: inventory_hostname == 'db_slave'
